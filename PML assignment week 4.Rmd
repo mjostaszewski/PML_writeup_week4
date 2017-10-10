@@ -1,0 +1,126 @@
+---
+title: "PML Project Assignment week 4"
+author: "Marek Ostaszewski"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Overview
+
+This document describes the analysis of the Weight Lifting Exercise Dataset and the model building excercise to predict the classes of the test dataset. The [Weight Lifting Exercise Dataset](http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises) was developed to analyze and assess human performance while excercising. It is described in detail in the publication:
+
+*Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H.* **Qualitative Activity Recognition of Weight Lifting Exercises.** Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+The dataset contains time-resolved body sensor measurements of different people performing excercises. There excercises are performed either correctly, or in four different wrong ways, givin alltogether five types of exercise - one correct and four wrong.
+
+## Dataset exploration
+
+Loading the datasets shows that they are quite different in size (19622 observations in the training dataset, 20 in the testing dataset). Also, there are some unused columns in the testing dataset, that are NAs.
+
+```{r dataset-read}
+training <- read.csv(file = "pml-training.csv")
+testing <- read.csv(file = "pml-testing.csv")
+str(training[,1:15])
+str(testing[,1:15])
+```
+
+Let's trim the unused variables in both datasets. First, check which columns in the testing dataset are all NAs. Then remove these columns from both training and testing dataset. Doing so greatly reduces the size of both datasets. The number of variables goes from 160 to 60.
+
+```{r dataset-trim}
+trim_unused <- apply(testing, 2, function(x) all(is.na(x)))
+trim_testing <- testing[,!trim_unused]
+trim_training <- training[,!trim_unused]
+```
+
+Another pre-processing step is to check, if the dataset needs to be normalized. Standard deviation is calculated for all numeric variables. Checking quantile distribution and examinng the plot of standard deviation distribution across parameters shows that some parameters have standard deviation of 400 and greater. Therefore both training and testing datasets are normalized.
+
+```{r dataset-scale}
+library(ggplot2)
+sds <- apply(trim_testing[,8:59], 2, sd)
+quantile(sds)
+qplot(data = data.frame(parameters = seq_along(sds), stdev = sds), x = parameters, y = stdev)
+norm_testing <- trim_testing
+norm_training <- trim_training
+for(col in 8:59) {
+  colmean <- mean(trim_training[,col])
+  colsd <- sd(trim_training[,col])
+  norm_training[,col] <- (trim_training[,col]-colmean)/colsd
+  norm_testing[,col] <- (trim_testing[,col]-colmean)/colsd
+}
+```
+
+## Model building
+
+With the normalized data, let's proceed with the model building excercise. I would like to construct three different models using the training data, compare their performance and use the best one to predict the classes of the test dataset.
+
+All three models will use 53 numeric parameters, from *roll_belt* to *magnet_forearm_z*. I've decided to drop the *timestamp* and *window* variables, as these parameters in the testing instances are not presented in a consecutive fashion. This excludes the sliding window approach and they seem to carry little value.
+
+Three models chosen for the task are classification trees (C5.0), stochastic gradient boosting (gbm) and supprt vector machines with radial function (svmRadial). All three models will be built using repeated cross-validation, with number of folds, k = 6 and number of repeats = 3.
+
+```{r model-try}
+library(caret)
+library(kernlab)
+library(C50)
+library(gbm)
+library(plyr)
+set.seed(2501)
+
+fitControl <- trainControl(method = "repeatedcv", number = 6, repeats = 3)
+if(!file.exists("gbm-cv-6f3r.Rd")) {
+  gbmFit <- train(classe ~ ., data = norm_training[,8:60], 
+                    method = "gbm", 
+                    trControl = fitControl)
+} else {
+  load("gbm-cv-6f3r.Rd")
+}
+gbmFit
+
+if(!file.exists("svmRad-cv-6f3r.Rd")) {
+  svmRadFit <- train(classe ~ ., data = norm_training[,8:60], 
+                    method = "svmRadial", 
+                    trControl = fitControl)
+} else {
+  load("svmRad-cv-6f3r.Rd")
+}
+svmRadFit
+
+if(!file.exists("C5.0-cv-6f3r.Rd")) {
+  C5.0Fit <- train(classe ~ ., data = norm_training[,8:60], 
+                    method = "C5.0", 
+                    trControl = fitControl)
+} else {
+  load("C5.0-cv-6f3r.Rd")
+}
+C5.0Fit
+```
+
+From the summaries of the models above we can see that the C5.0 model performs the best, with the average accuracy of 0.996. This allows us to estumate the out-of-sample error to 0.4%, which is very good, but may mean model overfitting. Importantly, the confusion matrix for the entire dataset (in-sample error) shows perfect classification performance (see below, the numbers are percentages).
+
+```{r model-best}
+pred <- predict(C5.0Fit, norm_training[8:59])
+confMat <- confusionMatrix(pred, norm_training$classe)
+
+confu <- data.frame(confMat$table)
+
+for(f in c("A", "B", "C", "D", "E")) {
+  this_class = confu$Reference == f
+  confu[this_class,]$Freq = (confu[this_class,]$Freq/sum(confu[this_class,]$Freq))*100
+}
+confu <- cbind(confu, Diag = (confu$Prediction == confu$Reference)+2)
+
+ggplot(aes(x = Reference, y = Prediction, fill = Freq), data = confu) +
+geom_tile(color = "black", size = 0.1) + labs(x="Actual",y="Predicted") +
+geom_text(aes(label=sprintf("%.2f", Freq)), data=subset(confu, as.character(Reference)!=as.character(Prediction)), colour="black") + scale_fill_gradient(low="lightgrey",high="lightblue") + 
+geom_text(aes(label=sprintf("%.2f", Freq), fontface = "bold"), data=subset(confu, as.character(Reference)==as.character(Prediction)), color="black")
+```
+
+Nevertheless, checking the cross-validation performance of the C5.0 model for each fold and repetition (below) shows consistency. Therefore I will predict the test set based on the C5.0 model.
+
+```{r model-resample}
+C5.0Fit$resample
+```
+
+
